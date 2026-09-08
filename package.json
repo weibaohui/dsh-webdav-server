@@ -1,0 +1,62 @@
+{
+  "name": "@weibaohui/dsh-webdav-server",
+  "version": "0.1.0",
+  "description": "dsh 插件 · WebDAV 服务器：把一个共享目录变成 Windows/macOS/Linux 都能挂载成本地磁盘的 WebDAV 服务，令牌认证、可选只读、目录/端口/令牌全可配，设置页自带三平台挂载指南。",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weibaohui/dsh-webdav-server.git"
+  },
+  "homepage": "https://github.com/weibaohui/dsh-webdav-server#readme",
+  "bugs": {
+    "url": "https://github.com/weibaohui/dsh-webdav-server/issues"
+  },
+  "license": "MIT",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client/bundle.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "client",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/server.js && node --check client/index.js",
+    "test": "node --test \"test/*.test.mjs\"",
+    "build:client": "node scripts/build-client.mjs",
+    "prepublishOnly": "npm run build:client && npm run check && npm test"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "webdav",
+    "mount",
+    "network-drive",
+    "file-sharing",
+    "nas"
+  ],
+  "dependencies": {
+    "@nephele/adapter-file-system": "1.0.0-alpha.67",
+    "@nephele/authenticator-custom": "1.0.0-alpha.67",
+    "express": "5.1.0",
+    "nephele": "1.0.0-alpha.67"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

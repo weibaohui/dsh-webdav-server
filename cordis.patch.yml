@@ -1,0 +1,11 @@
+# @weibaohui/dsh-webdav-server bundle patch: contributes the plugin row into the
+# host composition when this package is installed via `dsh plugin add`.
+#
+# The plugin is HOST-PLANE: it runs an independent WebDAV listener (express +
+# nephele) on its own port with token Basic auth, backed by a configurable
+# shared root directory. It must land in the host composition (this insert),
+# never inside an agent preset.
+
+- insert:
+    - id: dsh-webdav-server
+      name: '@weibaohui/dsh-webdav-server'
