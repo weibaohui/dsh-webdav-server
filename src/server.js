@@ -226,6 +226,10 @@ function startListener(app, cfg) {
     const server = http.createServer(app)
     // 默认 5 分钟请求超时会掐断大文件上传/下载（nephele README 同款建议）
     server.requestTimeout = 30 * 60 * 1000
+    // 默认 5s keep-alive 太激进：Apple 客户端 OPTIONS 后走 NetAuth IPC 取凭据
+    // 常超 5s，连接被关会让它放弃整个挂载序列；Finder/davfs2 操作间隙也会闲置
+    server.keepAliveTimeout = 120 * 1000
+    server.headersTimeout = 125 * 1000
     server.once('error', reject)
     server.listen(cfg.port, cfg.host, () => resolve(server))
   })
