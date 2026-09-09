@@ -20,6 +20,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const engine = require('./server')
+const { createUmAuth } = require('./um-auth')
 
 const name = engine.PLUGIN_ID
 const inject = ['webServer', 'settings']
@@ -93,6 +94,7 @@ function settingsSchema(Schema) {
     host: Schema.string().default(engine.DEFAULTS.host),
     port: Schema.number().step(1).min(engine.NUM_RANGES.port[0]).max(engine.NUM_RANGES.port[1]).default(engine.DEFAULTS.port),
     token: Schema.string().default(engine.DEFAULTS.token),
+    authMode: Schema.string().default(engine.DEFAULTS.authMode),
     readOnly: Schema.boolean().default(engine.DEFAULTS.readOnly),
     followLinks: Schema.boolean().default(engine.DEFAULTS.followLinks),
   })
@@ -122,6 +124,37 @@ module.exports = {
     let tokenFileCache = null
 
     const state = { server: null, fingerprint: '', error: null }
+
+    // user-management 凭据桥（进程内单例：缓存跨重建保留）
+    const umAuth = createUmAuth({})
+    const warnThrottledAt = new Map()
+    function warnThrottled(key, line, ttlMs = 60000) {
+      const t = Date.now()
+      if (t - (warnThrottledAt.get(key) || 0) < ttlMs) return
+      warnThrottledAt.set(key, t)
+      logger.warn(`dsh-webdav-server: ${line}`)
+    }
+
+    /**
+     * 认证闭包（随重建刷新）：token 模式直查令牌；user-management 模式走
+     * UM 凭据桥，用户库缺失/损坏时回退令牌兜底（不把人锁死在外面）。
+     */
+    function makeVerify(cfg) {
+      if (cfg.authMode !== 'user-management') {
+        return async (_username, password) => ({ ok: engine.timingSafeEqualStr(password, cfg.token) })
+      }
+      return async (username, password) => {
+        const r = umAuth.check(username, password)
+        if (r.unavailable) {
+          warnThrottled('um-unavailable', 'user-management 用户库不可用（缺失或损坏），回退令牌认证')
+          return { ok: engine.timingSafeEqualStr(password, cfg.token) }
+        }
+        if (!r.ok && r.reason) {
+          warnThrottled(`um:${username}:${r.reason}`, `WebDAV 认证拒绝 user=${username} (${r.reason})`)
+        }
+        return r
+      }
+    }
 
     function effective() {
       const fromSettings = settingsScope && typeof settingsScope.get === 'function'
@@ -198,6 +231,7 @@ module.exports = {
       const root = engine.resolveRootDir(cfg.root)
       const lan = engine.lanIPv4()
       const openToLan = cfg.host === '0.0.0.0' || cfg.host === '::'
+      const umMode = cfg.authMode === 'user-management'
       return {
         ok: true,
         running: Boolean(state.server),
@@ -209,6 +243,8 @@ module.exports = {
         urlLan: openToLan && lan ? `http://${lan}:${cfg.port}/` : null,
         root: root || cfg.root,
         rootIsDefault: Boolean(root) && root === engine.defaultRoot(),
+        authMode: cfg.authMode,
+        umAvailable: umMode ? umAuth.availability() === 'ok' : null,
         readOnly: cfg.readOnly,
         followLinks: cfg.followLinks,
         token,
@@ -258,11 +294,12 @@ module.exports = {
       await engine.closeServer(state.server)
       state.server = null
       try {
-        const { app } = await engine.createWebdavApp({ ...cfg, root })
+        const { app } = await engine.createWebdavApp({ ...cfg, root, verify: makeVerify(cfg) })
         state.server = await engine.startListener(app, cfg)
         state.error = null
         logger.info(
           `dsh-webdav-server: WebDAV http://${cfg.host}:${cfg.port}/ root=${root}` +
+            ` auth=${cfg.authMode === 'user-management' ? 'user-management' : 'token'}` +
             (cfg.readOnly ? ' [read-only]' : ''),
         )
       } catch (e) {

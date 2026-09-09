@@ -43,7 +43,9 @@ async function boot(overrides = {}) {
     root,
   })
   delete cfg.__root
-  const { app } = await engine.createWebdavApp({ ...cfg, root })
+  const extra = typeof overrides.__verify === 'function' ? { verify: overrides.__verify } : {}
+  delete overrides.__verify
+  const { app } = await engine.createWebdavApp({ ...cfg, root, ...extra })
   const server = await engine.startListener(app, cfg)
   const port = server.address().port
   const base = `http://127.0.0.1:${port}`
@@ -62,17 +64,34 @@ test('resolveRootDir：空值回默认根、~ 展开、相对路径拒绝', () =
 test('sanitizePatch：白名单 + 夹取', () => {
   const out = engine.sanitizePatch({
     enabled: 'yes', port: 80, host: 'bad host!', root: ' /tmp/x ', token: ' t ', evil: 1,
-    readOnly: true, followLinks: false,
-  }, { enabled: true, host: '0.0.0.0', port: 19087 })
+    readOnly: true, followLinks: false, authMode: 'nonsense',
+  }, { enabled: true, host: '0.0.0.0', port: 19087, authMode: 'token' })
   assert.deepEqual(out, {
     enabled: true, // 非真布尔 → 兜底 base 值，绝不吃进垃圾串
     port: 1024,
     host: '0.0.0.0', // 非法 host 保留 base
     root: '/tmp/x',
     token: 't',
+    authMode: 'token', // 非法枚举保留 base
     readOnly: true,
     followLinks: false,
   })
+  assert.equal(engine.sanitizePatch({ authMode: 'user-management' }, {}).authMode, 'user-management')
+})
+
+test('自定义 verify 回调：user-management 凭据桥接入点', async () => {
+  const { base, close } = await boot({
+    __verify: async (username, password) => ({ ok: username === 'alice' && password === 'alicepass' }),
+  })
+  try {
+    const alice = { Authorization: authHeader('alicepass', 'alice') }
+    assert.equal((await fetchRetry(base + '/', { method: 'PROPFIND', headers: { ...alice, Depth: '0' } })).status, 207)
+    assert.equal((await fetchRetry(base + '/', { method: 'PROPFIND', headers: { Authorization: authHeader('alicepass', 'mallory'), Depth: '0' } })).status, 401)
+    // 令牌在 UM 模式语义下不再放行（verify 只认 UM 凭据）
+    assert.equal((await fetchRetry(base + '/', { method: 'PROPFIND', headers: { Authorization: authHeader('test-token'), Depth: '0' } })).status, 401)
+  } finally {
+    await close()
+  }
 })
 
 test('normalizeConfig：脏配置兜底', () => {

@@ -35,12 +35,15 @@ const DEFAULTS = Object.freeze({
   port: 19087,
   // 空 = 首次启动自动生成并持久化（settings 服务或 token 文件）
   token: '',
+  // 认证模式：'token'（独立令牌）| 'user-management'（复用 UM 登录账号密码）
+  authMode: 'token',
   readOnly: false,
   followLinks: true,
 })
 
 const NUM_RANGES = Object.freeze({ port: [1024, 65535] })
 const BOOL_KEYS = Object.freeze(['enabled', 'readOnly', 'followLinks'])
+const AUTH_MODES = Object.freeze(['token', 'user-management'])
 // 只读放行的全部方法（读语义）；其余一律 403
 const READ_METHODS = Object.freeze(['GET', 'HEAD', 'OPTIONS', 'PROPFIND'])
 
@@ -106,6 +109,9 @@ function sanitizePatch(patch, base) {
   for (const k of ['root', 'token']) {
     if (k in patch) out[k] = cleanStr(patch[k])
   }
+  if ('authMode' in patch) {
+    out.authMode = AUTH_MODES.includes(patch.authMode) ? patch.authMode : b.authMode || DEFAULTS.authMode
+  }
   if ('host' in patch) {
     const host = cleanStr(patch.host)
     out.host = /^[a-zA-Z0-9.:\-_]+$/.test(host) ? host : cleanStr(b.host) || DEFAULTS.host
@@ -122,6 +128,7 @@ function normalizeConfig(raw) {
     host: /^[a-zA-Z0-9.:\-_]+$/.test(cleanStr(merged.host)) ? cleanStr(merged.host) : DEFAULTS.host,
     port: clampNum(merged.port, NUM_RANGES.port, DEFAULTS.port),
     token: cleanStr(merged.token),
+    authMode: AUTH_MODES.includes(merged.authMode) ? merged.authMode : DEFAULTS.authMode,
     readOnly: cleanBool(merged.readOnly, DEFAULTS.readOnly),
     followLinks: cleanBool(merged.followLinks, DEFAULTS.followLinks),
   }
@@ -129,7 +136,7 @@ function normalizeConfig(raw) {
 
 /** 重建判据：任一项变化都需重建监听器/中间件。 */
 function serverFingerprint(cfg) {
-  return [cfg.enabled, cfg.root, cfg.host, cfg.port, cfg.token, cfg.readOnly, cfg.followLinks].join('|')
+  return [cfg.enabled, cfg.root, cfg.host, cfg.port, cfg.token, cfg.authMode, cfg.readOnly, cfg.followLinks].join('|')
 }
 
 /** 共享根不存在则创建（含中间层）；失败返回错误对象。 */
@@ -182,11 +189,19 @@ async function createWebdavApp(cfg) {
     locks: 'meta-files',
   })
 
-  // 用户名不设限（挂载客户端往往强制要个用户名），密码=访问令牌。
+  // 用户名先放行到 authBasic（getUser 返回占位 User，存在性判定在 verify 里），
+  // verify(username, password) 由宿主半注入：令牌直查或 user-management 桥。
+  // 统一返回 { ok } 对象（裸布尔会在 authBasic 的 r.ok 判定上翻车）。
+  const verify = typeof cfg.verify === 'function'
+    ? cfg.verify
+    : async (_u, p) => ({ ok: timingSafeEqualStr(p, cfg.token) })
   const authenticator = new CustomAuthenticator({
     realm: 'dsh WebDAV',
     getUser: async (username) => new User({ username: cleanStr(username) || 'dsh' }),
-    authBasic: async (_user, password) => timingSafeEqualStr(password, cfg.token),
+    authBasic: async (user, password) => {
+      const r = await verify(user.username, password)
+      return Boolean(r && r.ok)
+    },
   })
 
   const app = express()
@@ -242,6 +257,7 @@ module.exports = {
   DEFAULTS,
   NUM_RANGES,
   BOOL_KEYS,
+  AUTH_MODES,
   dshHome,
   defaultRoot,
   tokenFile,
