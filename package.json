@@ -1,6 +1,6 @@
 {
   "name": "@weibaohui/dsh-webdav-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "dsh 插件 · WebDAV 服务器：把一个共享目录变成 Windows/macOS/Linux 都能挂载成本地磁盘的 WebDAV 服务，令牌认证、可选只读、目录/端口/令牌全可配，设置页自带三平台挂载指南。",
   "repository": {
     "type": "git",
