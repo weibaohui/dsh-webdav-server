@@ -49,6 +49,18 @@ async function boot(overrides = {}) {
   const server = await engine.startListener(app, cfg)
   const port = server.address().port
   const base = `http://127.0.0.1:${port}`
+  // 就绪探测：'listening' 事件后内核 backlog 首连在 macOS 高负载下偶发
+  // ECONNRESET，探测通了才返回，消掉整类首请求抖动
+  for (let i = 0; ; i++) {
+    try {
+      const probe = await fetch(base + '/', { method: 'OPTIONS' })
+      assert.ok(probe.status > 0)
+      break
+    } catch (e) {
+      if (i >= 25) throw e
+      await new Promise((r) => setTimeout(r, 100))
+    }
+  }
   return { server, base, root, cfg, close: () => engine.closeServer(server) }
 }
 
