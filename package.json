@@ -24,6 +24,10 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "engines": {
+    "node": ">=22.5",
+    "dsh": ">=0.1.2-rc.1"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -55,8 +59,5 @@
     "@nephele/authenticator-custom": "1.0.0-alpha.67",
     "express": "5.1.0",
     "nephele": "1.0.0-alpha.67"
-  },
-  "engines": {
-    "node": ">=22.5"
   }
 }
