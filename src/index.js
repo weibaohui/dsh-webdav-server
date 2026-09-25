@@ -27,12 +27,12 @@ const inject = ['webServer', 'settings', 'connection']
 const API_PREFIX = '/' + engine.PLUGIN_ID + '/api'
 const SETTINGS_NS = engine.PLUGIN_ID
 
-// ── schemastery 加载（settings 服务同源；缺席时仅 loader config 生效）──────
+// ── schemastery：从宿主 dsh 全局安装的 vendored 副本同步加载（0.1.7 起
+//    settings 服务通过 entry.fiber.runtime.Config 自动发现 schema，不再支持
+//    ctx.settings.register，故必须在模块顶层同步构建导出的 Config）。加载
+//    失败则 Config 缺席，插件仍可运行（退回 token 文件 + 进程内兜底）。
 
-const { pathToFileURL } = require('node:url')
 const os = require('node:os')
-
-let schemaPromise = null
 
 // 宿主 dsh 全局安装里的 vendored 副本。跟随 dsh bin 真实位置：
 // <prefix>/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/<pkg>/…
@@ -43,70 +43,53 @@ function hostCandidatePaths(pkgName, rel) {
   )
 }
 
-// schemastery 另有 CJS 副本，优先 CJS 保持与宿主 settings 服务同源；统一走
-// 动态 import()（CJS 顶层无法 await）。加载失败只降级不让宿主 boot 失败。
-function startSchemaLoader() {
-  if (!schemaPromise) {
-    schemaPromise = (async () => {
-      const candidates = [
-        ...hostCandidatePaths('schemastery', 'lib/index.cjs'),
-        '@deepseek-ai/schemastery',
-      ]
-      const errors = []
-      for (const target of candidates) {
-        try {
-          const specifier = target.includes('/') && !target.startsWith('@') && target.includes('node_modules')
-            ? pathToFileURL(target).href
-            : target
-          const mod = await import(specifier)
-          return mod
-        } catch (e) {
-          errors.push(`${target}: ${String((e && e.message) || e).slice(0, 160)}`)
-        }
-      }
-      throw new Error(errors.join(' | '))
-    })()
+// 同步加载 schemastery（CJS 副本优先，与宿主 settings 服务同源）。
+function loadSchemaSync() {
+  for (const target of hostCandidatePaths('schemastery', 'lib/index.cjs')) {
+    try { return require(target) } catch {}
   }
-  return schemaPromise
-}
-
-async function resolveSchema() {
-  try {
-    const mod = await startSchemaLoader()
-    if (!mod) return null
-    const Schema = mod.default || mod.Schema || (typeof mod === 'function' ? mod : null)
-    return Schema && typeof Schema.object === 'function' ? Schema : null
-  } catch {
-    return null
-  }
+  try { return require('@deepseek-ai/schemastery') } catch {}
+  return null
 }
 
 // 测试缝隙：预先注入 Schema，让单测不依赖本机宿主安装
-function __seedSchema(Schema) {
-  schemaPromise = Promise.resolve(Schema ? { default: Schema } : null)
+let __schemaOverride = null
+function __seedSchema(Schema) { __schemaOverride = Schema }
+
+// 兼容旧调用方（单测）：异步解析到同一份 Schema 或 null
+async function resolveSchema() {
+  const S = __schemaOverride || loadSchemaSync()
+  return S && typeof S.object === 'function' ? S : null
 }
 
-function settingsSchema(Schema) {
-  if (!Schema || typeof Schema.object !== 'function') return null
-  return Schema.object({
-    enabled: Schema.boolean().default(engine.DEFAULTS.enabled),
-    root: Schema.string().default(engine.DEFAULTS.root),
-    host: Schema.string().default(engine.DEFAULTS.host),
-    port: Schema.number().step(1).min(engine.NUM_RANGES.port[0]).max(engine.NUM_RANGES.port[1]).default(engine.DEFAULTS.port),
-    token: Schema.string().default(engine.DEFAULTS.token),
-    authMode: Schema.string().default(engine.DEFAULTS.authMode),
-    readOnly: Schema.boolean().default(engine.DEFAULTS.readOnly),
-    followLinks: Schema.boolean().default(engine.DEFAULTS.followLinks),
+function settingsSchema(S) {
+  if (!S || typeof S.object !== 'function') return null
+  // 字段标 .volatile()：0.1.7 settings 服务只把 volatile 字段投进设置 UI，
+  // 且只有 volatile 字段可经 ctx.settings.update 在线写回。
+  return S.object({
+    enabled: S.boolean().default(engine.DEFAULTS.enabled).volatile(),
+    root: S.string().default(engine.DEFAULTS.root).volatile(),
+    host: S.string().default(engine.DEFAULTS.host).volatile(),
+    port: S.number().step(1).min(engine.NUM_RANGES.port[0]).max(engine.NUM_RANGES.port[1]).default(engine.DEFAULTS.port).volatile(),
+    token: S.string().default(engine.DEFAULTS.token).volatile(),
+    authMode: S.string().default(engine.DEFAULTS.authMode).volatile(),
+    readOnly: S.boolean().default(engine.DEFAULTS.readOnly).volatile(),
+    followLinks: S.boolean().default(engine.DEFAULTS.followLinks).volatile(),
   })
 }
+
+// 0.1.7 settings 服务自动发现模块导出的 Config（entry.fiber.runtime.Config）。
+const Schema = __schemaOverride || loadSchemaSync()
+const Config = settingsSchema(Schema)
 
 // ── 插件 ─────────────────────────────────────────────────────────────────
 
 module.exports = {
   name,
   inject,
+  Config,
   version: engine.VERSION,
-  __internals: { settingsSchema, resolveSchema, __seedSchema, API_PREFIX, SETTINGS_NS },
+  __internals: { settingsSchema, loadSchemaSync, resolveSchema, __seedSchema, API_PREFIX, SETTINGS_NS },
 
   apply(ctx, config) {
     // 宿主可能过滤插件 logger 输出；console.error 走 stderr 保底可见（launchd 下进 err.log）
@@ -119,8 +102,8 @@ module.exports = {
     const webServer = ctx.webServer
 
     const base = engine.normalizeConfig({ ...engine.DEFAULTS, ...(config || {}) })
-    let settingsScope = null
-    let memoryPatch = {} // settings 服务缺席时的进程内兜底
+    let liveSettings = {} // 0.1.7：settings 文档里的实时 volatile 值（事件驱动刷新）
+    let memoryPatch = {} // settings 写回失败时的进程内兜底
     let tokenFileCache = null
 
     const state = { server: null, fingerprint: '', error: null }
@@ -156,11 +139,20 @@ module.exports = {
       }
     }
 
+    // 0.1.7：读取本命名空间在 settings 文档里的实时值（describe 投影后的 volatile 字段）。
+    // 没有 Config 或 settings 服务缺席时返回 {}，effective() 退回 base + memoryPatch。
+    function readLiveSettings() {
+      try {
+        if (!ctx.settings || typeof ctx.settings.describe !== 'function') return {}
+        const d = ctx.settings.describe().find((x) => x.ns === SETTINGS_NS)
+        return d && d.value ? d.value : {}
+      } catch {
+        return {}
+      }
+    }
+
     function effective() {
-      const fromSettings = settingsScope && typeof settingsScope.get === 'function'
-        ? settingsScope.get()
-        : null
-      return engine.normalizeConfig({ ...base, ...(fromSettings || {}), ...memoryPatch })
+      return engine.normalizeConfig({ ...base, ...liveSettings, ...memoryPatch })
     }
 
     /** 令牌落盘兜底：settings 服务缺席时写 token 文件（重启仍可挂载）。 */
@@ -196,9 +188,9 @@ module.exports = {
         return
       }
       let token = engine.generateToken()
-      if (settingsScope && typeof settingsScope.update === 'function') {
+      if (ctx.settings && typeof ctx.settings.update === 'function') {
         try {
-          await settingsScope.update({ token })
+          await ctx.settings.update(SETTINGS_NS, { token })
         } catch (e) {
           logger.warn(`dsh-webdav-server: 令牌写入 settings 失败，退回文件: ${(e && e.message) || e}`)
           memoryPatch.token = token
@@ -213,9 +205,9 @@ module.exports = {
 
     async function setToken(token) {
       memoryPatch = { ...memoryPatch, token }
-      if (settingsScope && typeof settingsScope.update === 'function') {
+      if (ctx.settings && typeof ctx.settings.update === 'function') {
         try {
-          await settingsScope.update({ token })
+          await ctx.settings.update(SETTINGS_NS, { token })
         } catch (e) {
           logger.warn(`dsh-webdav-server: 令牌写入 settings 失败，退回文件: ${(e && e.message) || e}`)
           writeTokenFile(token)
@@ -309,20 +301,25 @@ module.exports = {
       return status()
     }
 
-    // ── settings 注册（异步；缺席不阻塞宿主半其余功能）───────────────────
+    // ── settings 接线（0.1.7：导出 Config 即自动注册 schema + 自动生成设置
+    //    页面；这里只订阅文档变更刷新缓存，再 reconcile。settings 服务缺席或
+    //    Config 未构建时退回 token 文件与进程内兜底，不阻塞宿主半其余功能。）
     ;(async () => {
-      const Schema = await resolveSchema()
-      if (Schema && ctx.settings && typeof ctx.settings.register === 'function') {
-        try {
-          settingsScope = ctx.settings.register(SETTINGS_NS, settingsSchema(Schema), { base })
-          logger.info('dsh-webdav-server: settings-registered')
-        } catch (e) {
-          logger.warn(`dsh-webdav-server: settings register 失败（仅 loader config 生效）: ${(e && e.message) || e}`)
-        }
-      } else {
+      liveSettings = readLiveSettings()
+      if (!Config) {
         logger.warn(
-          `dsh-webdav-server: settings 不可用（Schema=${Boolean(Schema)}, ctx.settings=${Boolean(ctx.settings)}）——令牌/配置退回 token 文件与进程内兜底`,
+          `dsh-webdav-server: Config schema 未构建（schemastery 未加载）——令牌/配置退回 token 文件与进程内兜底`,
         )
+      }
+      if (ctx.on && typeof ctx.on === 'function') {
+        ctx.effect(() => {
+          const off = ctx.on('settings/document-updated', (ns) => {
+            if (ns !== SETTINGS_NS) return
+            liveSettings = readLiveSettings()
+            reconcile().catch((e) => logger.error(`dsh-webdav-server: reconcile: ${(e && e.message) || e}`))
+          })
+          return () => { try { off() } catch {} }
+        }, 'dsh-webdav-server: settings watch')
       }
       await reconcile()
     })().catch((e) => logger.error(`dsh-webdav-server: init: ${(e && e.message) || e}`))
@@ -393,9 +390,9 @@ module.exports = {
                 }
                 const patch = engine.sanitizePatch(patchBody, effective())
                 memoryPatch = { ...memoryPatch, ...patch }
-                if (settingsScope && typeof settingsScope.update === 'function') {
+                if (ctx.settings && typeof ctx.settings.update === 'function') {
                   try {
-                    await settingsScope.update(patch)
+                    await ctx.settings.update(SETTINGS_NS, patch)
                   } catch (e) {
                     logger.warn(`dsh-webdav-server: settings update 失败（仅本次进程生效）: ${(e && e.message) || e}`)
                   }
