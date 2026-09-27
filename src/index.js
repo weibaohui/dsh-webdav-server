@@ -79,8 +79,10 @@ function settingsSchema(S) {
 }
 
 // 0.1.7 settings 服务自动发现模块导出的 Config（entry.fiber.runtime.Config）。
+// settingsSchema 降级返回 null，导出必须归一成 undefined——宿主 schema() 只排除
+// undefined，"toJSON" in null 会炸 settings.describe()（同 dsh-continue#4）。
 const Schema = __schemaOverride || loadSchemaSync()
-const Config = settingsSchema(Schema)
+const Config = settingsSchema(Schema) ?? undefined
 
 // ── 插件 ─────────────────────────────────────────────────────────────────
 
