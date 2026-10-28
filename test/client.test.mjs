@@ -51,11 +51,12 @@ test('apply：注册 settings.section slot 并走 ctx.effect', () => {
   assert.ok(effects.includes('dsh-webdav-server: settings section'))
 })
 
-test('API 前缀约定：/dsh-webdav-server/api（客户端与宿主半一致）', () => {
+test('API 前缀约定：baseURI 推导、兜底 /dsh-webdav-server/api（子路径反代可用）', () => {
   const clientSrc = readFileSync(new URL('../client/index.js', import.meta.url), 'utf8')
   const hostSrc = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
   const engineSrc = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8')
-  assert.ok(clientSrc.includes("const API = '/dsh-webdav-server/api'"), '客户端 API 前缀')
+  assert.ok(clientSrc.includes('document.baseURI'), '客户端 API 基址随页面推导（子路径反代，dsh-sync#14 同款）')
+  assert.ok(clientSrc.includes("new URL('dsh-webdav-server/api'"), '相对段仍指向 /dsh-webdav-server/api')
   assert.ok(engineSrc.includes("const PLUGIN_ID = 'dsh-webdav-server'"), '引擎 PLUGIN_ID')
   assert.ok(hostSrc.includes("require('./server')"), '宿主半复用引擎 PLUGIN_ID')
 })
